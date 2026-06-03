@@ -1,0 +1,89 @@
+#include <Wire.h>
+#include "MAX30105.h"
+#include "spo2_algorithm.h" // Thư viện thuật toán SpO2 chính thức của hãng
+
+MAX30105 particleSensor;
+
+#define MAX_BRIGHTNESS 255
+
+// Bộ đệm dữ liệu thô phục vụ thuật toán
+uint32_t irBuffer[100]; // Dữ liệu LED hồng ngoại
+uint32_t redBuffer[100]; // Dữ liệu LED đỏ
+
+int32_t bufferLength = 100; // Chiều dài bộ đệm
+int32_t spo2; // Giá trị SpO2 tính được
+int8_t validSPO2; // Cờ báo giá trị SpO2 có hợp lệ không (1: Có, 0: Không)
+int32_t heartRate; // Giá trị nhịp tim tính được
+int8_t validHeartRate; // Cờ báo nhịp tim có hợp lệ không
+
+void setup() {
+  Serial.begin(115200);
+  
+  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
+    Serial.println(F("MAX30102 was not found. Please check wiring/power."));
+    while (1);
+  }
+
+  // Cấu hình chuẩn tối ưu cho thuật toán của hãng Maxim
+  byte ledBrightness = 60; 
+  byte sampleAverage = 1;  
+  byte ledMode = 2;        
+  int sampleRate = 100;    
+  int pulseWidth = 411;    
+  int adcRange = 4096;     
+
+  particleSensor.setup(ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange);
+}
+
+void loop() {
+  // 1. Đọc 100 mẫu đầu tiên vào bộ đệm (mất khoảng 1 giây)
+  for (byte i = 0 ; i < bufferLength ; i++) {
+    while (particleSensor.available() == false)
+      particleSensor.check(); 
+
+    redBuffer[i] = particleSensor.getRed();
+    irBuffer[i] = particleSensor.getIR();
+    particleSensor.nextSample(); 
+  }
+
+  // 2. Tính toán BPM và SpO2 từ 100 mẫu đầu tiên này
+  maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength, redBuffer, &spo2, &validSPO2, &heartRate, &validHeartRate);
+
+  // 3. Vòng lặp liên tục cập nhật dữ liệu mới và tính toán cuốn chiếu
+  while (1) {
+    // Đẩy 25 mẫu cũ ra, nạp 25 mẫu mới vào bộ đệm (cập nhật sau mỗi 250ms)
+    for (byte i = 25; i < 100; i++) {
+      redBuffer[i - 25] = redBuffer[i];
+      irBuffer[i - 25] = irBuffer[i];
+    }
+
+    for (byte i = 75; i < 100; i++) {
+      while (particleSensor.available() == false)
+        particleSensor.check();
+
+      redBuffer[i] = particleSensor.getRed();
+      irBuffer[i] = particleSensor.getIR();
+      particleSensor.nextSample();
+    }
+
+    // Tính lại BPM và SpO2 dựa trên bộ đệm đã cập nhật
+    maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength, redBuffer, &spo2, &validSPO2, &heartRate, &validHeartRate);
+
+    // 4. In kết quả ra màn hình nếu dữ liệu hợp lệ
+    if (irBuffer[99] < 50000) {
+      Serial.println("No finger?");
+    } else {
+      Serial.print(F("BPM="));
+      if (validHeartRate == 1) Serial.print(heartRate);
+      else Serial.print(F("Calculating..."));
+
+      Serial.print(F(", SpO2="));
+      if (validSPO2 == 1) {
+        Serial.print(spo2);
+        Serial.println(F("%"));
+      } else {
+        Serial.println(F("Calculating..."));
+      }
+    }
+  }
+}
