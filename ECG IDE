@@ -1,0 +1,24 @@
+#define PIN_LO_PLUS 23
+#define PIN_LO_MINUS 22
+#define PIN_OUTPUT 32
+
+unsigned long last_time = 0;
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(PIN_LO_PLUS, INPUT);
+  pinMode(PIN_LO_MINUS, INPUT);
+}
+
+void loop() {
+  // Bơm dữ liệu thô lên máy tính với tốc độ đúng 1000Hz (1ms)
+  if (micros() - last_time >= 1000) {
+    last_time += 1000;
+    
+    if (digitalRead(PIN_LO_PLUS) == 1 || digitalRead(PIN_LO_MINUS) == 1) {
+      Serial.println(0); // Báo hiệu tuột dây
+    } else {
+      Serial.println(analogRead(PIN_OUTPUT)); // Gửi dữ liệu thô
+    }
+  }
+}
