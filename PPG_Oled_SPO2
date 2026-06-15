@@ -1,0 +1,164 @@
+#include <Wire.h>
+#include <U8g2lib.h>
+#include "MAX30105.h"
+
+// =======================
+// OLED I2C BUS 0
+// =======================
+#define BUS0_SDA_PIN 21
+#define BUS0_SCL_PIN 22
+
+U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
+
+// =======================
+// MAX30102
+// =======================
+MAX30105 particleSensor;  
+bool maxOK = false;
+
+long irValue = 0;        
+long redValue = 0;       
+
+unsigned long lastOledMs = 0;
+
+// Các biến phục vụ tính toán SpO2
+float minRed = 999999, maxRed = 0;
+float minIR = 999999, maxIR = 0;
+int sampleCount = 0;
+int spo2 = 0; 
+
+// =======================
+// OLED DISPLAY (Đã sửa theo yêu cầu)
+// =======================
+void drawOLED(const char *statusText) {
+  u8g2.clearBuffer();
+  
+  u8g2.setFont(u8g2_font_6x10_tr);
+  char line[32];
+
+  // 1. In trạng thái hệ thống lên dòng đầu tiên (Y = 10)
+  snprintf(line, sizeof(line), "Status: %s", statusText);
+  u8g2.drawStr(0, 10, line);
+  u8g2.drawLine(0, 14, 127, 14); // Đường gạch ngang phân cách ngắn xuống chút
+
+  // 2. Hiện thông số IR Raw (Y = 26)
+  snprintf(line, sizeof(line), "IR Raw : %ld", irValue);
+  u8g2.drawStr(0, 26, line);
+
+  // 3. HIỆN LẠI THÔNG SỐ RED RAW (Y = 38)
+  snprintf(line, sizeof(line), "RED Raw: %ld", redValue);
+  u8g2.drawStr(0, 38, line);
+
+  // 4. Kiểm tra xem có đặt tay vào không và hiển thị SpO2 (Y = 50 và 62)
+  if (irValue < 50000) {
+    u8g2.setFont(u8g2_font_6x10_tr);
+    u8g2.drawStr(0, 50, "Finger : No Finger");
+    u8g2.drawStr(0, 62, "SpO2   : -- %");
+  } else {
+    u8g2.setFont(u8g2_font_6x10_tr);
+    u8g2.drawStr(0, 50, "Finger : Detected");
+    
+    // Hiển thị SpO2 chữ ĐẬM ở dòng cuối cùng
+    u8g2.setFont(u8g2_font_7x14B_tr); 
+    if (spo2 == 0) {
+      snprintf(line, sizeof(line), "SpO2   : Calib...");
+    } else {
+      snprintf(line, sizeof(line), "SpO2   : %d %%", spo2);
+    }
+    u8g2.drawStr(0, 62, line);
+  }
+
+  u8g2.sendBuffer();    
+}
+
+// =======================
+// HÀM TÍNH TOÁN SPO2
+// =======================
+void calculateSpO2(long currentIR, long currentRed) {
+  if (currentIR < 50000) {
+    minRed = 999999; maxRed = 0;
+    minIR = 999999;  maxIR = 0;
+    sampleCount = 0;
+    spo2 = 0;
+    return;
+  }
+
+  if (currentRed < minRed) minRed = currentRed;
+  if (currentRed > maxRed) maxRed = currentRed;
+  if (currentIR < minIR) minIR = currentIR;
+  if (currentIR > maxIR) maxIR = currentIR;
+
+  sampleCount++;
+
+  if (sampleCount >= 50) {
+    float acRed = maxRed - minRed;
+    float dcRed = minRed; 
+
+    float acIR = maxIR - minIR;
+    float dcIR = minIR;
+
+    if (dcRed > 0 && dcIR > 0 && acIR > 0) {
+      float R = (acRed / dcRed) / (acIR / dcIR);
+      int calculatedSpo2 = int(104 - 17 * R);
+
+      if (calculatedSpo2 > 100) calculatedSpo2 = 100;
+      if (calculatedSpo2 < 70) calculatedSpo2 = 70; 
+
+      spo2 = calculatedSpo2;
+    }
+
+    minRed = 999999; maxRed = 0;
+    minIR = 999999;  maxIR = 0;
+    sampleCount = 0;
+  }
+}
+
+// =======================
+// SETUP
+// =======================
+void setup() {
+  Serial.begin(115200);
+  delay(2000);
+
+  Wire.begin(BUS0_SDA_PIN, BUS0_SCL_PIN);    
+  Wire.setClock(400000);                     
+
+  u8g2.begin();
+  u8g2.setContrast(220);                    
+  drawOLED("BOOTING");                      
+
+  if (!particleSensor.begin(Wire, 400000)) {
+    maxOK = false;
+    drawOLED("MAX FAIL");
+    while (1) { delay(1000); }
+  }
+
+  particleSensor.setup(60, 4, 2, 100, 411, 4096);
+  maxOK = true;
+  drawOLED("MAX OK");
+}
+
+// =======================
+// LOOP
+// =======================
+void loop() {
+  if (!maxOK) return; 
+
+  // Đọc liên tục 
+  irValue = particleSensor.getIR();
+  redValue = particleSensor.getRed();
+
+  // Tính toán liên tục
+  calculateSpO2(irValue, redValue);
+
+  // Cập nhật OLED định kỳ 500ms
+  if (millis() - lastOledMs >= 500) {
+    lastOledMs = millis();
+
+    if (irValue == 0 || redValue == 0) {
+      drawOLED("READ ERROR");       
+    } else {
+      drawOLED("Dang do...");        
+    }
+  }
+}
