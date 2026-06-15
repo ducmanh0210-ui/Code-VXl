@@ -7,8 +7,8 @@
 // =======================
 // OLED I2C BUS 0 --> Dùng chung cho Oled & MAX30102
 // =======================
-#define BUS0_SDA_PIN 6
-#define BUS0_SCL_PIN 7
+#define BUS0_SDA_PIN 21
+#define BUS0_SCL_PIN 22
 
 // =======================
 // OLED SH1106 1.3 inch
@@ -59,7 +59,7 @@ void drawOLED(const char *statusText) {
   u8g2.drawStr(0,55, "Finger : Detected");
  }
 
-  u8g2.drawStr(0, 64, "MAX: SDA6 SCL7");
+  u8g2.drawStr(0, 64, "MAX: SDA21 SCL22");
 
 // Đẩy dữ liệu từ RAM lên màn hình
   u8g2.sendBuffer();    
@@ -98,8 +98,8 @@ void setup() {
     Serial.println("Kiem tra day noi:");
     Serial.println("MAX30102 VCC -> 3.3V");
     Serial.println("MAX30102 GND -> GND");
-    Serial.println("MAX30102 SDA -> GPIO6");
-    Serial.println("MAX30102 SCL -> GPIO7");
+    Serial.println("MAX30102 SDA -> GPIO21");
+    Serial.println("MAX30102 SCL -> GPIO22");
     Serial.println("Dia chi MAX30102 thuong la 0x57");
 
     drawOLED("MAX FAIL");
