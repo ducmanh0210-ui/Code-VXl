@@ -1,0 +1,110 @@
+import serial
+import threading
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from scipy import signal
+
+# ==========================================
+# CẤU HÌNH HỆ THỐNG
+# ==========================================
+PORT = 'COM3'      # Đổi lại cổng COM của bạn
+BAUD = 115200
+FS = 1000.0        # Tần số lấy mẫu (1000Hz)
+WINDOW_SIZE = 4000 # Hiển thị 4 giây dữ liệu
+
+raw_buffer = np.full(WINDOW_SIZE, 2048.0)
+lock = threading.Lock()
+
+# ==========================================
+# 1. LUỒNG ĐỌC DỮ LIỆU TỪ USB
+# ==========================================
+def read_serial_data():
+    global raw_buffer
+    try:
+        ser = serial.Serial(PORT, BAUD, timeout=1)
+        print(f"\n[THANH CONG] Da mo cong {PORT}. Dang nhan du lieu thon...")
+        while True:
+            try:
+                line = ser.readline().decode('utf-8').strip()
+                if line:
+                    value = float(line)
+                    with lock:
+                        raw_buffer = np.roll(raw_buffer, -1)
+                        raw_buffer[-1] = value
+            except ValueError:
+                pass
+    except Exception as e:
+        print(f"\n[LOI] Khong the ket noi {PORT}: {e}")
+
+thread = threading.Thread(target=read_serial_data, daemon=True)
+thread.start()
+
+# ==========================================
+# 2. THUẬT TOÁN TÍNH NHỊP TIM (BPM) CHO TÍN HIỆU THÔ
+# ==========================================
+def calculate_bpm(raw_data):
+    # Vì KHÔNG DÙNG BỘ LỌC, tín hiệu sẽ bị trôi dạt (nền thay đổi liên tục).
+    # Thay vì dùng 'height' cố định, ta dùng 'prominence' (độ nổi trội của đỉnh so với xung quanh)
+    # Khoảng cách tối thiểu giữa 2 nhịp vẫn là 0.4 giây (FS * 0.4)
+    peaks, _ = signal.find_peaks(raw_data, prominence=300, distance=int(FS * 0.4))
+    
+    bpm = 0
+    if len(peaks) >= 2:
+        # Tính khoảng cách trung bình giữa các đỉnh (giây)
+        rr_intervals = np.diff(peaks) / FS
+        mean_rr = np.mean(rr_intervals)
+        if mean_rr > 0:
+            bpm = int(60.0 / mean_rr)
+    return bpm, peaks
+
+# ==========================================
+# 3. GIAO DIỆN ĐỒ THỊ VÀ ANIMATION
+# ==========================================
+fig, ax = plt.subplots(figsize=(12, 6))
+fig.canvas.manager.set_window_title('He thong Do ECG - Tin hieu THO (Khong loc)')
+
+x_data = np.arange(WINDOW_SIZE) / FS
+# Đổi nhãn thành "Tin hieu ECG tho" để chính xác với bản chất dữ liệu lúc này
+line_raw, = ax.plot(x_data, raw_buffer, color='red', linewidth=1.5, label='Tin hieu ECG thon')
+peak_scatter, = ax.plot([], [], 'go', markersize=7, label='Dinh R') # Chấm xanh đánh dấu đỉnh
+
+# Text hiển thị BPM ở góc màn hình
+bpm_text = ax.text(0.02, 0.92, 'BPM: --', transform=ax.transAxes, 
+                   fontsize=18, color='green', fontweight='bold',
+                   bbox=dict(facecolor='white', alpha=0.7))
+
+# Giữ nguyên giới hạn ADC (0 - 4095 cho ESP32/Arduino hoặc tùy biến độ cảm biến của bạn)
+ax.set_ylim(0, 4096) 
+ax.set_xlim(0, WINDOW_SIZE / FS)
+ax.set_xlabel("Thoi gian (Giay)")
+ax.set_ylabel("Bien do (ADC)")
+ax.legend(loc="upper right")
+ax.grid(True, linestyle='--', alpha=0.6)
+
+def update_plot(frame):
+    with lock:
+        current_data = np.copy(raw_buffer)
+        
+    # KHÔNG QUA BỘ LỌC - Tín hiệu thô được đưa trực tiếp vào xử lý
+    final_signal = current_data 
+    
+    # Tính BPM trực tiếp trên dữ liệu thô
+    bpm, peaks = calculate_bpm(final_signal)
+    
+    # Cập nhật đồ thị
+    line_raw.set_ydata(final_signal)
+    if len(peaks) > 0:
+        peak_scatter.set_data(x_data[peaks], final_signal[peaks])
+        if bpm > 0:
+            bpm_text.set_text(f'Nhip tim: {bpm} BPM')
+    else:
+        peak_scatter.set_data([], [])
+        bpm_text.set_text('Nhip tim: Dang do...')
+        
+    return line_raw, peak_scatter, bpm_text
+
+ani = FuncAnimation(fig, update_plot, interval=50, blit=True, cache_frame_data=False)
+
+plt.tight_layout()
+plt.show()
