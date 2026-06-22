@@ -1,0 +1,62 @@
+#define PIN_LO_PLUS 23
+#define PIN_LO_MINUS 22
+#define PIN_OUTPUT 32
+
+// Khai báo con trỏ Timer theo cú pháp mới
+hw_timer_t * timer = NULL;
+portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
+
+volatile int ecgValue = 0;
+volatile bool dataReady = false;
+
+// ==========================================
+// HÀM PHỤC VỤ NGẮT TIMER (ISR)
+// ==========================================
+void IRAM_ATTR onTimer() {
+  portENTER_CRITICAL_ISR(&timerMux);
+  
+  if (digitalRead(PIN_LO_PLUS) == 1 || digitalRead(PIN_LO_MINUS) == 1) {
+    ecgValue = 0; 
+  } else {
+    ecgValue = analogRead(PIN_OUTPUT); 
+  }
+  dataReady = true; 
+  
+  portEXIT_CRITICAL_ISR(&timerMux);
+}
+
+// ==========================================
+// SETUP
+// ==========================================
+void setup() {
+  Serial.begin(115200);
+  pinMode(PIN_LO_PLUS, INPUT);
+  pinMode(PIN_LO_MINUS, INPUT);
+
+  // CÚ PHÁP MỚI (ESP32 Core v3.x):
+  // 1. timerBegin nhận vào TẦN SỐ hoạt động trực tiếp (Hz).
+  // Đặt tần số là 1000000 Hz (1MHz) để mỗi tick = 1 microgiây.
+  timer = timerBegin(1000000);
+
+  // 2. Gắn hàm ngắt (Hàm mới chỉ nhận 2 tham số, không còn tham số 'true' ở cuối)
+  timerAttachInterrupt(timer, &onTimer);
+
+  // 3. Đặt thời gian chu kỳ báo thức (Tính bằng microgiây).
+  // 1000 microgiây = 1 miligiây (Tần số lấy mẫu 1000Hz).
+  // Hàm này thay thế cho cả 'timerAlarmWrite' và 'timerAlarmEnable' cũ.
+  timerAlarm(timer, 1000, true, 0);
+}
+
+// ==========================================
+// LOOP
+// ==========================================
+void loop() {
+  if (dataReady) {
+    portENTER_CRITICAL(&timerMux);
+    int currentEcg = ecgValue;
+    dataReady = false;
+    portEXIT_CRITICAL(&timerMux);
+
+    Serial.println(currentEcg);
+  }
+}
