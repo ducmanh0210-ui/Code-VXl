@@ -1,0 +1,139 @@
+#include <Wire.h>
+#include <U8g2lib.h>
+#include "MAX30105.h"
+
+#define BUS0_SDA_PIN 21
+#define BUS0_SCL_PIN 22
+
+// Khởi tạo màn hình (Thử driver SH1106, nếu tối om hãy đổi sang SSD1306 như hướng dẫn bên dưới)
+U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
+// U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE); // Bật dòng này nếu dùng màn SSD1306
+
+MAX30105 particleSensor;  
+bool maxOK = false;
+
+// Biến toàn cục nhận dữ liệu từ loop
+long irValue = 0;        
+long redValue = 0;       
+
+// Biến volatile dùng trong ngắt
+volatile bool ppgTriggerFlag = false;
+
+hw_timer_t *timer = NULL;
+portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
+
+float minRed = 999999, maxRed = 0;
+float minIR = 999999, maxIR = 0;
+int sampleCount = 0;
+int spo2 = 0; 
+unsigned long lastOledMs = 0;
+
+void drawOLED(const char *statusText) {
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_6x10_tr);
+  char line[32];
+
+  snprintf(line, sizeof(line), "Status: %s", statusText);
+  u8g2.drawStr(0, 10, line);
+  u8g2.drawLine(0, 14, 127, 14); 
+
+  snprintf(line, sizeof(line), "IR Raw : %ld", irValue);
+  u8g2.drawStr(0, 26, line);
+
+  snprintf(line, sizeof(line), "RED Raw: %ld", redValue);
+  u8g2.drawStr(0, 38, line);
+
+  if (irValue < 50000) {
+    u8g2.drawStr(0, 50, "Finger : No Finger");
+    u8g2.drawStr(0, 62, "SpO2   : -- %");
+  } else {
+    u8g2.drawStr(0, 50, "Finger : Detected");
+    u8g2.setFont(u8g2_font_7x14B_tr); 
+    if (spo2 == 0) {
+      snprintf(line, sizeof(line), "SpO2   : Calib...");
+    } else {
+      snprintf(line, sizeof(line), "SpO2   : %d %%", spo2);
+    }
+    u8g2.drawStr(0, 62, line);
+  }
+  u8g2.sendBuffer();    
+}
+
+void calculateSpO2(long currentIR, long currentRed) {
+  if (currentIR < 50000) {
+    minRed = 999999; maxRed = 0; minIR = 999999; maxIR = 0; sampleCount = 0; spo2 = 0;
+    return;
+  }
+  if (currentRed < minRed) minRed = currentRed;
+  if (currentRed > maxRed) maxRed = currentRed;
+  if (currentIR < minIR) minIR = currentIR;
+  if (currentIR > maxIR) maxIR = currentIR;
+  sampleCount++;
+
+  if (sampleCount >= 50) {
+    float acRed = maxRed - minRed; float dcRed = minRed; 
+    float acIR = maxIR - minIR;   float dcIR = minIR;
+    if (dcRed > 0 && dcIR > 0 && acIR > 0) {
+      float R = (acRed / dcRed) / (acIR / dcIR);
+      int calculatedSpo2 = int(104 - 17 * R);
+      if (calculatedSpo2 > 100) calculatedSpo2 = 100;
+      if (calculatedSpo2 < 70) calculatedSpo2 = 70; 
+      spo2 = calculatedSpo2;
+    }
+    minRed = 999999; maxRed = 0; minIR = 999999; maxIR = 0; sampleCount = 0;
+  }
+}
+
+// Hàm ngắt CHỈ bật cờ hiệu, không đọc I2C trực tiếp
+void IRAM_ATTR onTimer() {
+  portENTER_CRITICAL_ISR(&timerMux);
+  ppgTriggerFlag = true; 
+  portEXIT_CRITICAL_ISR(&timerMux);
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  Wire.begin(BUS0_SDA_PIN, BUS0_SCL_PIN);    
+  Wire.setClock(400000);                     
+
+  u8g2.begin();
+  u8g2.setContrast(220);                    
+  drawOLED("BOOTING");                      
+
+  if (!particleSensor.begin(Wire, 400000)) {
+    maxOK = false;
+    drawOLED("MAX FAIL");
+    while (1) { delay(500); }
+  }
+
+  particleSensor.setup(60, 4, 2, 100, 411, 4096);
+  maxOK = true;
+  drawOLED("MAX ONLINE");
+
+  // Khởi tạo timer chu kỳ 40ms (25Hz) an toàn
+  timer = timerBegin(1000000);
+  timerAttachInterrupt(timer, &onTimer);
+  timerAlarm(timer, 40000, true, 0); 
+}
+
+void loop() {
+  if (!maxOK) return;
+
+  // Việc đọc dữ liệu I2C nặng được đưa ra ngoài loop để xử lý khi có cờ báo từ ngắt
+  if (ppgTriggerFlag) {
+    portENTER_CRITICAL(&timerMux);
+    ppgTriggerFlag = false;
+    portEXIT_CRITICAL(&timerMux);
+
+    irValue = particleSensor.getIR();
+    redValue = particleSensor.getRed();
+    calculateSpO2(irValue, redValue);
+  }
+
+  if (millis() - lastOledMs >= 500) {
+    lastOledMs = millis();
+    drawOLED("Dang Do");
+  }
+}
