@@ -1,0 +1,210 @@
+#include <Wire.h>
+#include <U8g2lib.h>
+#include "MAX30105.h"
+
+// ==========================================
+// 1. CẤU HÌNH CHÂN (ĐÃ SỬA XUNG ĐỘT I2C)
+// ==========================================
+#define PIN_LO_PLUS 23     // Giữ nguyên 
+#define PIN_LO_MINUS 14    // ĐÃ ĐỔI TỪ 22 SANG 14 ĐỂ TRÁNH TRÙNG I2C SCL
+#define PIN_OUTPUT 32      // Giữ nguyên 
+#define PIN_PPG_INT 4      // Chân INT của MAX30102 nối vào GPIO 4 [cite: 45]
+
+// ==========================================
+// 2. KHỞI TẠO ĐỐI TƯỢNG VÀ BIẾN TOÀN CỤC
+// ==========================================
+U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE); // 
+MAX30105 particleSensor;
+
+hw_timer_t * timer = NULL; // [cite: 46]
+portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED; // [cite: 2]
+
+// Biến cho Đa Ngắt (Multi-Interrupt)
+volatile int volatile_ecg_val = 0; // [cite: 46]
+volatile bool volatile_ecg_fault = false; // [cite: 47]
+volatile bool ecg_ready = false; // [cite: 47]
+volatile bool ppg_ready = false; // [cite: 48]
+
+// Biến tính SpO2 và hiển thị
+float minRed = 999999, maxRed = 0; // [cite: 19]
+float minIR = 999999, maxIR = 0; // [cite: 19]
+int sampleCount = 0; // [cite: 19]
+int spo2 = 0; // [cite: 20]
+unsigned long lastOledMs = 0; // [cite: 20]
+
+// ==========================================
+// 3. HÀM TÍNH TOÁN SPO2
+// ==========================================
+void calculateSpO2(long currentIR, long currentRed) {
+  if (currentIR < 50000) {
+    minRed = 999999; maxRed = 0; minIR = 999999; maxIR = 0; sampleCount = 0; spo2 = 0; // [cite: 29]
+    return; // [cite: 30]
+  }
+  
+  if (currentRed < minRed) minRed = currentRed;
+  if (currentRed > maxRed) maxRed = currentRed;
+  if (currentIR < minIR) minIR = currentIR; // [cite: 31]
+  if (currentIR > maxIR) maxIR = currentIR;
+  
+  sampleCount++;
+  
+  if (sampleCount >= 50) { // [cite: 32]
+    float acRed = maxRed - minRed; float dcRed = minRed; // [cite: 32]
+    float acIR = maxIR - minIR;   float dcIR = minIR; // [cite: 33]
+
+    if (dcRed > 0 && dcIR > 0 && acIR > 0) { // [cite: 34]
+      float R = (acRed / dcRed) / (acIR / dcIR); // [cite: 34]
+      int calculatedSpo2 = int(104 - 17 * R); // [cite: 35]
+      if (calculatedSpo2 > 100) calculatedSpo2 = 100; // [cite: 35]
+      if (calculatedSpo2 < 70) calculatedSpo2 = 70;  // [cite: 36]
+      spo2 = calculatedSpo2;
+    }
+    minRed = 999999; maxRed = 0; minIR = 999999; maxIR = 0; sampleCount = 0; // [cite: 37]
+  }
+}
+
+// ==========================================
+// 4. HÀM CẬP NHẬT GIAO DIỆN OLED
+// ==========================================
+void drawOLED(int currentEcg, long currentIR, long currentRed) {
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_6x10_tr);
+  char line[32];
+
+  // Trạng thái Điện tim
+  if (volatile_ecg_fault) {
+    u8g2.drawStr(0, 10, "ECG : Tuot day!");
+  } else {
+    snprintf(line, sizeof(line), "ECG ADC: %d", currentEcg);
+    u8g2.drawStr(0, 10, line);
+  }
+  u8g2.drawLine(0, 14, 127, 14); // [cite: 21]
+
+  // Trạng thái Nhịp mạch
+  if (currentIR < 50000) { // [cite: 23]
+    u8g2.drawStr(0, 30, "Finger : No Finger"); // [cite: 23]
+    u8g2.drawStr(0, 60, "SpO2   : -- %"); // [cite: 24]
+  } else {
+    u8g2.drawStr(0, 30, "Finger : Detected");
+    
+    snprintf(line, sizeof(line), "IR: %ld", currentIR);
+    u8g2.drawStr(0, 42, line);
+    
+    u8g2.setFont(u8g2_font_7x14B_tr);
+    if (spo2 == 0) { // [cite: 25]
+      u8g2.drawStr(0, 60, "SpO2: Calib...");
+    } else { // [cite: 26]
+      snprintf(line, sizeof(line), "SpO2: %d %%", spo2); // [cite: 26]
+      u8g2.drawStr(0, 60, line);
+    }
+  }
+  u8g2.sendBuffer(); // [cite: 27]
+}
+
+// ==========================================
+// 5. CÁC HÀM NGẮT (ISR)
+// ==========================================
+// Ngắt Timer cho ECG (1000Hz)
+void IRAM_ATTR onTimer() {
+  portENTER_CRITICAL_ISR(&timerMux); // [cite: 3]
+  if (digitalRead(PIN_LO_PLUS) == 1 || digitalRead(PIN_LO_MINUS) == 1) { // [cite: 4]
+    volatile_ecg_fault = true; // [cite: 49]
+    volatile_ecg_val = 0; // [cite: 50]
+  } else { // [cite: 5]
+    volatile_ecg_fault = false;
+    volatile_ecg_val = analogRead(PIN_OUTPUT); // [cite: 50]
+  }
+  ecg_ready = true; // [cite: 50]
+  portEXIT_CRITICAL_ISR(&timerMux); // [cite: 6]
+}
+
+// Ngắt chân INT cho PPG (100Hz)
+void IRAM_ATTR onPpgInterrupt() {
+  ppg_ready = true; // [cite: 51]
+}
+
+// ==========================================
+// SETUP
+// ==========================================
+void setup() {
+  Serial.begin(115200); 
+  
+  pinMode(PIN_LO_PLUS, INPUT); // [cite: 52]
+  pinMode(PIN_LO_MINUS, INPUT); // [cite: 52]
+  pinMode(PIN_PPG_INT, INPUT_PULLUP); // [cite: 52]
+
+  Wire.begin(21, 22);
+  Wire.setClock(400000);
+
+  u8g2.begin();
+  u8g2.setContrast(220);
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_6x10_tr);
+  u8g2.drawStr(20, 30, "Booting...");
+  u8g2.sendBuffer();
+
+  if (particleSensor.begin(Wire, 400000) == false) { // [cite: 39]
+    Serial.println("Khong tim thay MAX30102"); // [cite: 53]
+    while (1); // [cite: 53]
+  }
+
+  particleSensor.setup(0x1F, 1, 2, 100, 411, 4096); // [cite: 54, 55, 56]
+  particleSensor.enableDATARDY(); // [cite: 56]
+  particleSensor.getINT1(); // [cite: 57]
+  
+  attachInterrupt(digitalPinToInterrupt(PIN_PPG_INT), onPpgInterrupt, FALLING); // [cite: 57]
+
+  timer = timerBegin(1000000); // [cite: 8, 57]
+  timerAttachInterrupt(timer, &onTimer); // [cite: 9, 57]
+  timerAlarm(timer, 1000, true, 0); // [cite: 12, 58]
+}
+
+// ==========================================
+// LOOP
+// ==========================================
+void loop() {
+  static int current_ecg = 0;
+  static long current_ir = 0;
+  static long current_red = 0;
+
+  // 1. GỬI DỮ LIỆU ECG LÊN PYTHON (1000Hz)
+  if (ecg_ready) {
+    portENTER_CRITICAL(&timerMux);
+    ecg_ready = false; // [cite: 14]
+    current_ecg = volatile_ecg_val;
+    portEXIT_CRITICAL(&timerMux);
+
+    if (volatile_ecg_fault) { // [cite: 59]
+      Serial.println("E,0"); // [cite: 59]
+    } else {
+      Serial.print("E,"); // [cite: 59]
+      Serial.println(current_ecg); // [cite: 60]
+    }
+  }
+
+  // 2. GỬI DỮ LIỆU PPG LÊN PYTHON (100Hz)
+  if (ppg_ready) {
+    ppg_ready = false; 
+    particleSensor.getINT1(); // [cite: 62]
+    particleSensor.check(); // [cite: 62]
+
+    while (particleSensor.available()) { // [cite: 63]
+      current_red = particleSensor.getFIFORed(); // [cite: 63]
+      current_ir = particleSensor.getFIFOIR(); // [cite: 63]
+      
+      Serial.print("P,"); // [cite: 63]
+      Serial.print(current_red); // [cite: 63]
+      Serial.print(",");
+      Serial.println(current_ir); // [cite: 63]
+      
+      calculateSpO2(current_ir, current_red);
+      particleSensor.nextSample(); // [cite: 63]
+    }
+  }
+
+  // 3. CẬP NHẬT MÀN HÌNH OLED (Mỗi 500ms để không làm giật đồ thị Python)
+  if (millis() - lastOledMs >= 500) { // 
+    lastOledMs = millis(); // 
+    drawOLED(current_ecg, current_ir, current_red);
+  }
+}
