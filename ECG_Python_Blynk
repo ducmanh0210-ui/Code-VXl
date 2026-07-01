@@ -1,0 +1,149 @@
+import serial
+import threading
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from scipy import signal
+import requests # 🔥 Thư viện mới để đẩy lên Blynk
+import time
+
+# ==========================================
+# CẤU HÌNH HỆ THỐNG & BLYNK
+# ==========================================
+PORT = 'COM3'      
+BAUD = 115200
+FS = 1000.0        
+WINDOW_SIZE = 4000 
+
+# 🔥 ĐIỀN AUTH TOKEN CỦA BẠN VÀO ĐÂY:
+BLYNK_AUTH = 'DYG_iHeyEcqIpTuYkN72YP8lmTYgr1qb'
+BLYNK_URL = f"https://sgp1.blynk.cloud/external/api/update?token={BLYNK_AUTH}"
+
+raw_buffer = np.full(WINDOW_SIZE, 2048.0)
+lock = threading.Lock()
+
+# Biến toàn cục để chia sẻ dữ liệu cho Blynk
+current_spo2 = 0
+current_bpm = 0
+
+# ==========================================
+# 1. LUỒNG ĐỌC SERIAL (Bắt thêm chữ O)
+# ==========================================
+def read_serial_data():
+    global raw_buffer, current_spo2
+    try:
+        ser = serial.Serial(PORT, BAUD, timeout=1)
+        ser.reset_input_buffer() 
+        print(f"\n[THANH CONG] Da ket noi. Dang lang nghe ECG va SpO2...")
+        
+        while True:
+            try:
+                line = ser.readline().decode('utf-8', errors='ignore').strip()
+                if line:
+                    parts = line.split(',')
+                    
+                    if parts[0] == 'E' and len(parts) == 2:
+                        value = float(parts[1])
+                        if value == 0: value = 2048.0
+                        with lock:
+                            raw_buffer = np.roll(raw_buffer, -1)
+                            raw_buffer[-1] = value
+                            
+                    # 🔥 BẮT GÓI DỮ LIỆU SPO2 (Chữ O)
+                    elif parts[0] == 'O' and len(parts) == 2:
+                        current_spo2 = int(parts[1])
+                        
+                    if ser.in_waiting > 2000:
+                        ser.reset_input_buffer()
+            except:
+                pass
+    except Exception as e:
+        print(f"\n[LOI] Khong the ket noi {PORT}: {e}")
+
+threading.Thread(target=read_serial_data, daemon=True).start()
+
+# ==========================================
+# 2. LUỒNG BLYNK IOT GATEWAY (Chạy Ngầm)
+# ==========================================
+def blynk_worker():
+    while True:
+        time.sleep(2) # Cập nhật mỗi 2 giây
+        try:
+            # Ép gửi dữ liệu liên tục kể cả khi bằng 0 để test
+            url = f"{BLYNK_URL}&v0={current_bpm}&v1={current_spo2}" 
+            print(f"[BLYNK] Dang gui len App -> BPM: {current_bpm} | SpO2: {current_spo2}")
+            
+            response = requests.get(url, timeout=5)
+            
+            if response.status_code == 200:
+                print("[BLYNK] -> Gửi THÀNH CÔNG!")
+            else:
+                print(f"[BLYNK] -> LỖI SERVER: {response.status_code}")
+                
+        except Exception as e:
+            print(f"[BLYNK] -> RỚT MẠNG HOẶC LỖI PYTHON: {e}")
+
+threading.Thread(target=blynk_worker, daemon=True).start()
+
+# ==========================================
+# HỆ THỐNG LỌC VÀ GIAO DIỆN (Giữ nguyên như cũ)
+# ==========================================
+def remove_ecg_artifacts(data, threshold=500):
+    data_clean = np.copy(data)
+    mask = data_clean < threshold
+    for idx in np.where(mask)[0]:
+        mask[max(0, idx-5):min(len(data), idx+10)] = True
+    good_idx, bad_idx = np.where(~mask)[0], np.where(mask)[0]
+    if len(good_idx) > 0: data_clean[bad_idx] = np.interp(bad_idx, good_idx, data_clean[good_idx])
+    return data_clean
+
+def notch_filter(data, fs=1000.0):
+    b, a = signal.iirnotch(50.0 / (0.5 * fs), 30.0)
+    return signal.filtfilt(b, a, data)
+
+def butter_bandpass(data, fs=1000.0):
+    b, a = signal.butter(2, [0.5/(0.5 * fs), 40.0/(0.5 * fs)], btype='band')
+    return signal.filtfilt(b, a, data)
+
+def calculate_bpm(filtered_data):
+    peaks, _ = signal.find_peaks(filtered_data, height=2400, distance=int(FS * 0.4))
+    return int(60.0 / np.mean(np.diff(peaks) / FS)) if len(peaks) >= 2 else 0, peaks
+
+fig, ax = plt.subplots(figsize=(12, 6))
+fig.canvas.manager.set_window_title('He thong Do ECG & Nhip tim (IoT Edition)')
+
+x_data = np.arange(WINDOW_SIZE) / FS
+line_clean, = ax.plot(x_data, raw_buffer, color='red', linewidth=1.5, label='Sóng điện tim')
+peak_scatter, = ax.plot([], [], 'go', markersize=7, label='Đỉnh R') 
+
+bpm_text = ax.text(0.02, 0.92, 'Nhip tim: Dang do...', transform=ax.transAxes, 
+                   fontsize=18, color='green', fontweight='bold', bbox=dict(facecolor='white', alpha=0.7))
+
+ax.set_ylim(0, 4096)
+ax.set_xlim(0, WINDOW_SIZE / FS)
+ax.legend(loc="upper right")
+ax.grid(True, linestyle='--', alpha=0.6)
+
+def update_plot(frame):
+    global current_bpm # 🔥 Kéo biến toàn cục vào để tính xong chuyển sang cho luồng Blynk
+    with lock: current_data = np.copy(raw_buffer)
+        
+    final_signal = butter_bandpass(notch_filter(remove_ecg_artifacts(current_data))) + 2048.0
+    bpm, peaks = calculate_bpm(final_signal)
+    
+    line_clean.set_ydata(final_signal)
+    if len(peaks) > 0:
+        peak_scatter.set_data(x_data[peaks], final_signal[peaks])
+        if bpm > 0:
+            current_bpm = bpm # 🔥 Cập nhật biến BPM cho Blynk
+            bpm_text.set_text(f'Nhip tim: {bpm} BPM')
+    else:
+        peak_scatter.set_data([], [])
+        current_bpm = 0
+        bpm_text.set_text('Nhip tim: Dang do...')
+        
+    return line_clean, peak_scatter, bpm_text
+
+ani = FuncAnimation(fig, update_plot, interval=30, blit=True, cache_frame_data=False)
+plt.tight_layout()
+plt.show()
