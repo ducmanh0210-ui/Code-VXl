@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from scipy import signal
-import requests # 🔥 Thư viện mới để đẩy lên Blynk
+import requests # Thư viện mới để đẩy lên Blynk
 import time
 
 # ==========================================
@@ -15,7 +15,7 @@ BAUD = 115200
 FS = 1000.0        
 WINDOW_SIZE = 4000 
 
-# 🔥 ĐIỀN AUTH TOKEN CỦA BẠN VÀO ĐÂY:
+# ĐIỀN AUTH TOKEN CỦA BẠN VÀO ĐÂY:
 BLYNK_AUTH = 'DYG_iHeyEcqIpTuYkN72YP8lmTYgr1qb'
 BLYNK_URL = f"https://sgp1.blynk.cloud/external/api/update?token={BLYNK_AUTH}"
 
@@ -49,7 +49,7 @@ def read_serial_data():
                             raw_buffer = np.roll(raw_buffer, -1)
                             raw_buffer[-1] = value
                             
-                    # 🔥 BẮT GÓI DỮ LIỆU SPO2 (Chữ O)
+                    # BẮT GÓI DỮ LIỆU SPO2 (Chữ O)
                     elif parts[0] == 'O' and len(parts) == 2:
                         current_spo2 = int(parts[1])
                         
@@ -69,16 +69,21 @@ def blynk_worker():
     while True:
         time.sleep(2) # Cập nhật mỗi 2 giây
         try:
-            # Ép gửi dữ liệu liên tục kể cả khi bằng 0 để test
-            url = f"{BLYNK_URL}&v0={current_bpm}&v1={current_spo2}" 
             print(f"[BLYNK] Dang gui len App -> BPM: {current_bpm} | SpO2: {current_spo2}")
             
-            response = requests.get(url, timeout=5)
+            # Tách riêng 2 đường link cho 2 chỉ số
+            url_bpm = f"https://sgp1.blynk.cloud/external/api/update?token={BLYNK_AUTH}&v0={current_bpm}"
+            url_spo2 = f"https://sgp1.blynk.cloud/external/api/update?token={BLYNK_AUTH}&v1={current_spo2}"
             
-            if response.status_code == 200:
-                print("[BLYNK] -> Gửi THÀNH CÔNG!")
+            # Gửi chuyến xe số 1 (Nhịp tim - V0)
+            req_bpm = requests.get(url_bpm, timeout=3)
+            # Gửi chuyến xe số 2 (SpO2 - V1)
+            req_spo2 = requests.get(url_spo2, timeout=3)
+            
+            if req_bpm.status_code == 200 and req_spo2.status_code == 200:
+                print("[BLYNK] -> Đã cập nhật ĐỒNG THỜI cả 2 số thành công!")
             else:
-                print(f"[BLYNK] -> LỖI SERVER: {response.status_code}")
+                print("[BLYNK] -> LỖI SERVER!")
                 
         except Exception as e:
             print(f"[BLYNK] -> RỚT MẠNG HOẶC LỖI PYTHON: {e}")
@@ -125,7 +130,7 @@ ax.legend(loc="upper right")
 ax.grid(True, linestyle='--', alpha=0.6)
 
 def update_plot(frame):
-    global current_bpm # 🔥 Kéo biến toàn cục vào để tính xong chuyển sang cho luồng Blynk
+    global current_bpm # Kéo biến toàn cục vào để tính xong chuyển sang cho luồng Blynk
     with lock: current_data = np.copy(raw_buffer)
         
     final_signal = butter_bandpass(notch_filter(remove_ecg_artifacts(current_data))) + 2048.0
@@ -135,7 +140,7 @@ def update_plot(frame):
     if len(peaks) > 0:
         peak_scatter.set_data(x_data[peaks], final_signal[peaks])
         if bpm > 0:
-            current_bpm = bpm # 🔥 Cập nhật biến BPM cho Blynk
+            current_bpm = bpm # Cập nhật biến BPM cho Blynk
             bpm_text.set_text(f'Nhip tim: {bpm} BPM')
     else:
         peak_scatter.set_data([], [])
